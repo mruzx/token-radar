@@ -1,7 +1,7 @@
 // A token-radar-01 entry (Node 22, standard library only).
 //
 // The program reads the sealed snapshot from /input/snapshot.json (or --input <file|dir>),
-// scores every pre-token protocol with the radar-3 model in lib/model.ts, writes the ranked
+// scores every pre-token protocol with the radar-4 model in lib/model.ts, writes the ranked
 // board to /output/board.json, and copies this repository's dashboard/ and screenshots/ to
 // /output. Last, it writes /output/dossier.json, the summary the judge reads, with the
 // vendored make.fun library.
@@ -10,7 +10,8 @@
 // dashboard/app.css and dashboard/app.js read /output/data.js, which this program writes
 // from the same board. The model refits both halves against the snapshot's own traded
 // protocols — a size curve plus shrunk category effects for the value if it launches,
-// and a logistic on age, family size, size and growth for the token odds — so the board
+// and survival-conditional token odds from a category-ridge logistic on age, size and
+// growth — so the board
 // is a claim the dashboard can show its working for, row by row.
 //
 // Outside the grader's container, MAKEFUN_OUTPUT_DIR stands in for /output:
