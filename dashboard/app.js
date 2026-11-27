@@ -1,7 +1,4 @@
-// Token Radar dashboard, model radar-3. Reads window.RADAR (written beside
-// dashboard/ by main.ts) and renders the board, filters, stat cards, accounting,
-// evidence, a per-protocol detail view, the live-token view and category effects.
-// No network: every byte it shows is in data.js.
+// Token Radar dashboard, model radar-4. Renders the board from window.RADAR. No network.
 (function () {
   'use strict';
 
@@ -37,10 +34,9 @@
   function fmtMult(n) { return 'x' + n.toFixed(2); }
   function fmtOdds(n) { return Math.round(n * 100) + '%'; }
 
-  // radar-3 in one function: the page recomputes a row from the snapshot figures and
-  // checks the number board.json carries, so the page's code and the board's data are
-  // visibly the same arithmetic. If-launches is TVL times the size multiple times the
-  // category effect; implied is if-launches times token odds times the parent factor.
+  // The page recomputes each row from the snapshot figures and checks the number
+  // board.json carries: if-launches = TVL x size multiple x category effect,
+  // implied = if-launches x token odds x parent factor.
   function iflOf(row) {
     return Math.max(1, Math.round(row.tvl_usd * row.size_multiple * row.category_effect));
   }
@@ -48,10 +44,7 @@
     return Math.max(1, Math.round(iflOf(row) * row.token_odds * row.parent_factor));
   }
 
-  // The farm plan is the same derivation main.ts writes to board.json: a position
-  // of 0.02% of TVL capped at $10,000, an expected drop of 7.0% of the implied
-  // value (scaled by the position's share of TVL), fees and hours by primary chain,
-  // and a verdict against a T-bill and a $25/hour bar. The sliders reprice it live.
+  // The farm plan mirrors board.json: 0.02% of TVL (cap $10,000), a 7.0% drop, fees and hours by primary chain, a verdict vs a T-bill and $25/hour. The sliders reprice it live.
   function farmFor(row) {
     var m = DATA.model;
     var chain = row.chains && row.chains.length > 0 ? row.chains[0] : null;
@@ -66,8 +59,9 @@
     return { position: position, drop: drop, fees: fees, hours: hours, net: net, netPerHour: netPerHour, tbill: tbill, verdict: verdict };
   }
   function verdictCounts(list) {
-    var c = { FARM: 0, MARGINAL: 0, SKIP: 0 };
-    list.forEach(function (r) { c[farmFor(r).verdict] = (c[farmFor(r).verdict] || 0) + 1; });
+    var c = { FARM: 0, MARGINAL: 0, SKIP: 0, farm: [] };
+    list.forEach(function (r) { var f = farmFor(r); c[f.verdict]++; if (f.verdict === 'FARM') c.farm.push([r.name, f.netPerHour]); });
+    c.farm.sort(function (a, b) { return b[1] - a[1]; });
     return c;
   }
 
@@ -92,8 +86,7 @@
     return node;
   }
 
-  // The farm steps are generic guidance: category, chains, TVL and age decide the
-  // action, the capital, the hold and every cost and time. No name is special-cased.
+  // Farm steps are generic guidance from category, chains, TVL and age. No name is special-cased.
   function chainOf(p) { return p.chains && p.chains.length > 0 ? p.chains[0] : 'its main chain'; }
   function capitalFor(p) {
     if (p.tvl_usd >= 5e9) return 250;
@@ -208,9 +201,7 @@
   }
 
   function keptOf(list) {
-    // Kept terms among the tested ones: the baseline row and the placebo control
-    // do not count. Value rows are flat, size, family, category, growth, age,
-    // chain, control; odds rows are base, age, family, size, growth, chain, control.
+    // Kept terms among the tested ones; the baseline and the placebo control do not count.
     var tested = list.filter(function (e) { return e.term.indexOf('control') < 0 && e.term !== 'flat median multiple' && e.term !== 'base rate'; });
     var kept = tested.filter(function (e) { return e.kept; }).length;
     return kept + ' of ' + tested.length;
@@ -232,11 +223,11 @@
     document.getElementById('model-text').textContent =
       'Two fits score every protocol. The value fit is a joint ridge on log(market cap) against log(TVL) and the category, fit on the ' + DATA.value.traded_n +
       ' traded tokens that are not bridges, liquid staking or versioned/wrapped products: a size slope of ' + DATA.value.slope.toFixed(2) +
-      ' with a multiple of ' + fmtMult(DATA.value.mult_at_100m) + ' at $100M of TVL, and a shrunk effect per category. The odds fit is a logistic on ' +
+      ' with a multiple of ' + fmtMult(DATA.value.mult_at_100m) + ' at $100M of TVL, and a shrunk effect per category. The odds are survival-conditional: the chance a protocol eventually records a token, given it has not by its current age, (F(t_max) − F(age)) / (1 − F(age)), where F(t) is a logistic on ' +
       DATA.odds.peers_n + ' peers — the ' + DATA.accounting.ranked + ' ranked rows plus ' + (DATA.odds.peers_n - DATA.accounting.ranked) +
-      ' with-token protocols that are not left out by the house rules — on age in years, family size (how many protocols share the category), log TVL and 7-day growth. ' +
-      'Its coefficients are ' + DATA.odds.beta.map(function (b) { return b.toFixed(2); }).join(', ') + ' (intercept first), base rate ' +
-      Math.round(DATA.odds.base_rate * 100) + '%. The odds run lower than a first glance at the biggest protocols suggests, because the logistic is fit on all ' +
+      ' with-token protocols that are not left out by the house rules — on age in years, log TVL and 7-day growth, plus a per-category ridge-16 effect (families ' + DATA.evidence.bootstrap.odds_family_lo.toFixed(2) + ' to ' + DATA.evidence.bootstrap.odds_family_hi.toFixed(2) + '). ' +
+      'Its coefficients are ' + DATA.odds.beta.map(function (b) { return b.toFixed(2); }).join(', ') + ' (intercept first), t_max ' + DATA.odds.t_max_years.toFixed(2) + ' years — the oldest peer’s age — base rate ' +
+      Math.round(DATA.odds.base_rate * 100) + '%. The odds run lower than a first glance at the biggest protocols suggests, because the curve is fit on all ' +
       DATA.odds.peers_n + ' peers — including the many smaller protocols that never launch — and it trusts older, larger, slower-growing protocols most.';
     fillEvidence();
     fillCategories();
@@ -271,7 +262,8 @@
     host.appendChild(statCard('Worth farming',
       vc.FARM + ' <small>of ' + DATA.board_size + '</small>',
       vc.MARGINAL + ' marginal, ' + vc.SKIP + ' skip. Farm needs the net to beat a T-bill at ' + (DATA.model.tbill_annual * 100).toFixed(2) +
-      '% over ' + state.plan.horizon + ' weeks <i>and</i> $' + DATA.model.farm_hourly_usd + '/hour. No row clears both bars at the current plan.'));
+      '% over ' + state.plan.horizon + ' weeks <i>and</i> $' + DATA.model.farm_hourly_usd + '/hour. ' +
+      (vc.farm.length ? vc.farm.length + ' clear both bars, best first: ' + vc.farm.map(function (f) { return f[0] + ' ' + fmtMoney(f[1]) + '/hr'; }).join(', ') + '.' : 'No row clears both bars at the current plan.')));
     host.appendChild(statCard('Watchlist ranked',
       DATA.accounting.watchlist + ' / ' + DATA.watchlist_size,
       'Plus ' + (DATA.accounting.off_list + DATA.accounting.early) + ' pre-token (' + DATA.accounting.off_list + ' off-list, ' + DATA.accounting.early + ' early).'));
@@ -307,9 +299,7 @@
     });
   }
 
-  // The top-pick spotlight: the rank-1 row, rendered from the same data as the
-  // board. Every number comes from DATA.rows[0]; no name is special-cased and no
-  // figure is hand-written. It answers: how big, why it ranks first, the catch.
+  // The top-pick spotlight: the rank-1 row, rendered from the same data as the board.
   function fillTopPick() {
     var host = document.getElementById('top-pick-body');
     if (!host) return;
@@ -342,8 +332,8 @@
       el('b', { text: 'Why it ranks #1: ' }),
       'the biggest TVL on the board (' + fmtUsd(r.tvl_usd) + ') priced at ' + fmtUsd(r.if_launches_usd) +
       ' if it launched — TVL × a size multiple of ' + r.size_multiple.toFixed(4) + ' × a ' + (r.category || 'Other') + ' effect of ' + r.category_effect.toFixed(3) +
-      ' — times token odds of ' + fmtOdds(r.token_odds) + ' from ' + fmtAge(r.age_days) + ' of no-token history, ' + r.family_size +
-      ' protocols in its family, ' + fmtUsd(r.tvl_usd) + ' of TVL and a ' + fmtPct(r.change_7d) + ' week. ' +
+      ' — times token odds of ' + fmtOdds(r.token_odds) + ': a survival chance from ' + fmtAge(r.age_days) + ' of no-token history, a ' + (r.category || 'Other') + ' effect of ' + r.family_effect.toFixed(2) +
+      ', ' + fmtUsd(r.tvl_usd) + ' of TVL and a ' + fmtPct(r.change_7d) + ' week. ' +
       fmtUsd(r.if_launches_usd) + ' × ' + fmtOdds(r.token_odds) + ' ≈ ' + fmtUsd(r.implied_value_usd) + '.'
     ));
     host.appendChild(el('p', { class: 'hero-verdict' },
@@ -394,7 +384,7 @@
       '. Odds in log-odds: years listed +' + b.odds_age.toFixed(2) + ' ± ' + b.odds_age_se.toFixed(2) +
       '; TVL +' + b.odds_tvl.toFixed(2) + ' ± ' + b.odds_tvl_se.toFixed(2) +
       '; 7-day growth ' + b.odds_growth.toFixed(1) + ' ± ' + b.odds_growth_se.toFixed(1) +
-      '; families +' + b.odds_family.toFixed(2) + ' ± ' + b.odds_family_se.toFixed(3) + '.';
+      '; family effects ' + b.odds_family_lo.toFixed(2) + ' to ' + b.odds_family_hi.toFixed(2) + ' (ridge 16; that range’s width varies ±' + b.odds_family_spread_se.toFixed(2) + ' over ' + b.refits + ' refits).';
   }
 
   function fillCategories() {
@@ -473,7 +463,9 @@
   function boardTable() {
     var list = sortedRows(rows());
     var vc = verdictCounts(DATA.rows);
-    document.getElementById('count').textContent = list.length + ' of ' + DATA.board_size + ' rows · ' + fmtUsd(DATA.accounting.total_tvl_usd) + ' TVL · ' + fmtUsd(DATA.accounting.total_implied_usd) + ' implied';
+    var st = [0, 0];
+    list.forEach(function (r) { st[0] += r.tvl_usd; st[1] += r.implied_value_usd; });
+    document.getElementById('count').textContent = list.length + ' of ' + DATA.board_size + ' rows · ' + fmtUsd(st[0]) + ' TVL · ' + fmtUsd(st[1]) + ' implied';
     document.querySelectorAll('#verdict-tabs button').forEach(function (btn) {
       var v = btn.getAttribute('data-verdict');
       btn.setAttribute('aria-selected', state.verdict === v ? 'true' : 'false');
@@ -605,9 +597,9 @@
         el('div', null, el('span', { text: 'Implied value' }), el('b', { class: 'num', text: fmtUsd(row.implied_value_usd) })),
         el('div', null, el('span', { text: 'Range' }), el('b', { class: 'num', text: fmtUsd(row.range_lo_usd) + ' – ' + fmtUsd(row.range_hi_usd) }))
       ),
-      el('p', { class: 'sub', text: 'Model ' + DATA.model_version + ': the same function scores every protocol. The odds are a logistic on age ' +
-        row.age_years.toFixed(2) + 'y × ' + b[1].toFixed(2) + ', family size ' + row.family_size + ' × ' + b[2].toFixed(2) + ', log TVL × ' + b[3].toFixed(2) +
-        ', 7-day growth ' + (row.growth_frac * 100).toFixed(1) + '% × ' + b[4].toFixed(1) + ', intercept ' + b[0].toFixed(2) + '. ' +
+      el('p', { class: 'sub', text: 'Model ' + DATA.model_version + ': the same function scores every protocol. Token odds are survival-conditional: (F(t_max) − F(age)) / (1 − F(age)), where F(t) is a logistic on age ' +
+        row.age_years.toFixed(2) + 'y × ' + b[1].toFixed(2) + ', log TVL × ' + b[2].toFixed(2) + ', 7-day growth ' + (row.growth_frac * 100).toFixed(1) + '% × ' + b[3].toFixed(1) + ', intercept ' + b[0].toFixed(2) + ', plus a ' + (row.category || 'Other') + ' effect of ' + row.family_effect.toFixed(2) + '. ' +
+        'F(age) = ' + (row.odds_f_age * 100).toFixed(1) + '%, F(t_max) = ' + (row.odds_f_max * 100).toFixed(1) + '% at t_max ' + DATA.odds.t_max_years.toFixed(2) + 'y, so the odds are ' + fmtOdds(row.token_odds) + '. ' +
         'The page recomputes this row as ' + fmtUsd(recomputedIfl) + ' if it launched and ' + fmtUsd(recomputed) + ' implied' +
         (recomputed === row.implied_value_usd && recomputedIfl === row.if_launches_usd ? ', the same numbers board.json carries.' : ', which differ from the board: the data would be stale.') +
         (row.parent_factor !== 1 ? ' The 0.48 parent factor applies because this is an off-list sub-product above the floor whose parent is already recorded.' : '') +
