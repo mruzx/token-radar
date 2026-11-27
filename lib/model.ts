@@ -1,7 +1,7 @@
-// The token radar's model, version radar-3: one snapshot of the protocol universe in, one
+// The token radar's model, version radar-4: one snapshot of the protocol universe in, one
 // ranked board out.
 //
-// radar-3 refits both halves of the radar against the snapshot's own traded protocols,
+// radar-4 refits both halves of the radar against the snapshot's own traded protocols,
 // instead of pricing off a category median the way radar-2 did.
 //
 //   Value, if it launches. log(market cap) is fit on the 98 traded tokens the house rules
@@ -14,13 +14,17 @@
 //   kept because it trims the walk-forward miss further. Growth, age and chain count
 //   were tested and did not survive both tests, so they are not in the value model.
 //
-//   Token odds. A logistic on the 442 peers the board can score (the 198 ranked
-//   pre-token protocols plus the 244 recorded live-token protocols the house rules
-//   leave): years listed, the size of the protocol's family (how many protocols share
-//   its category), log TVL and seven-day growth. Older, larger protocols are more
-//   likely to have a token; fast growth leans the other way. Age is the time since the
-//   protocol was first listed; the 59 peers with no listing date take the median age.
-//   The full model scores Brier 0.20 leave-one-out against 0.25 for the base rate.
+//   Token odds. The odds are survival-conditional: the chance a protocol
+//   eventually records a token given it has not recorded one by its current age,
+//   (F(t_max) − F(age)) / (1 − F(age)), where F(t) is the recording curve — a
+//   logistic on the 442 peers the board can score (the 198 ranked pre-token
+//   protocols plus the 244 recorded live-token protocols the house rules leave):
+//   years listed, log TVL and seven-day growth, plus a per-category ridge-16
+//   random effect (the family). Older, larger protocols are more likely to have
+//   a token; fast growth leans the other way. t_max is 5.07 years, the oldest
+//   peer's age in the snapshot. Age is the time since the protocol was first
+//   listed; the 59 peers with no listing date take the median age. The curve's
+//   Brier is 0.20 leave-one-out against 0.25 for the base rate.
 //
 //   Implied value = if-launches x token odds, times 0.48 for the 20 off-list rows
 //   (above the $50M floor but not on the watchlist: a sub-product whose parent is
@@ -109,7 +113,7 @@ export interface ModelConstants {
 export const MODEL: ModelConstants = {
   value_ridge_lambda: 256,
   value_traded_n: 98,
-  odds_family: 'category size',
+  odds_family: 'category ridge-16',
   parent_factor: 0.48,
   position_share: 0.0002,
   position_cap_usd: 10000,
@@ -132,7 +136,7 @@ export const MODEL: ModelConstants = {
 };
 
 /** The model's version label: the dashboard names it and the rules quote it. */
-export const MODEL_VERSION = 'radar-3';
+export const MODEL_VERSION = 'radar-4';
 
 /** A farm step: the action, what it costs, and how long it takes. */
 export interface FarmStep {
@@ -177,6 +181,9 @@ export interface BoardRow {
     size_multiple: number;
     category_effect: number;
     odds_logit: number;
+    odds_f_age: number;
+    odds_f_max: number;
+    family_effect: number;
     age_years: number;
     family_size: number;
     growth_frac: number;
@@ -215,6 +222,9 @@ export interface RadarRow {
   category_effect: number;
   age_years: number;
   family_size: number;
+  odds_f_age: number;
+  odds_f_max: number;
+  family_effect: number;
   growth_frac: number;
   /** True when the protocol is on the snapshot's watchlist. */
   watchlist: boolean;
@@ -263,8 +273,9 @@ export interface Evidence {
     odds_tvl_se: number;
     odds_growth: number;
     odds_growth_se: number;
-    odds_family: number;
-    odds_family_se: number;
+    odds_family_lo: number;
+    odds_family_hi: number;
+    odds_family_spread_se: number;
   };
 }
 
@@ -298,7 +309,15 @@ export interface RadarData {
   model_version: string;
   market_median: number;
   value: { slope: number; mult_at_100m: number; traded_n: number; category_effects: Record<string, number> };
-  odds: { beta: number[]; peers_n: number; base_rate: number; median_age_years: number };
+  odds: {
+    beta: number[];
+    group_effects: Record<string, number>;
+    t_max_years: number;
+    kind: string;
+    peers_n: number;
+    base_rate: number;
+    median_age_years: number;
+  };
   evidence: Evidence;
   accounting: Accounting;
   watchlist_size: number;
@@ -542,14 +561,6 @@ export function oddsFeatures(snapshot: Snapshot, peers: { p: SnapshotProtocol; y
   return { medianAge, familySize };
 }
 
-function oddsFeaturesFor(f: OddsFeatures, asOf: string): (p: SnapshotProtocol) => number[] {
-  return (p: SnapshotProtocol) => {
-    const a = ageYears(asOf, p.listed_at);
-    const age = a === null ? f.medianAge : a;
-    return [age, f.familySize.get(p.category ?? 'Other') ?? 1, Math.log(p.tvl_usd), finite(p.change_7d, 0) / 100];
-  };
-}
-
 /**
  * The odds fit: a logistic on a feature vector, by iteratively reweighted least
  * squares. `start` warm-starts the fit, which is what makes the leave-one-out
@@ -592,6 +603,145 @@ export function fitOdds(
     return 1 / (1 + Math.exp(-Math.max(-30, Math.min(30, z))));
   };
   return { beta, pred, logit };
+}
+
+/** A penalized logistic with a per-group ridge random effect. `baseFeat` returns
+ * the base features with the protocol's age in years FIRST (the survival curve
+ * substitutes a time t for it); `groupOf` names the group (the category). The
+ * penalty `lambda` applies to the group dummies only. Warm-starting from a full
+ * fit keeps the leave-one-out refits cheap, as with fitOdds. */
+export interface OddsRidgeFit {
+  beta: number[];
+  baseCount: number;
+  groups: string[];
+  gidx: Map<string, number>;
+  /** The logit of F(t): the share of peers that record a token by age t, for a
+   * protocol with this one's size, growth and group. */
+  logitAt: (p: SnapshotProtocol, t: number) => number;
+  /** F(t) itself. */
+  fAt: (p: SnapshotProtocol, t: number) => number;
+  /** F(age): the share recorded by the protocol's own age. */
+  pred: (p: SnapshotProtocol) => number;
+}
+
+export function fitOddsRidge(
+  peers: { p: SnapshotProtocol; y: number }[],
+  baseFeat: (p: SnapshotProtocol) => number[],
+  groupOf: (p: SnapshotProtocol) => string,
+  lambda: number,
+  startBeta?: number[],
+  maxIt = 80,
+): OddsRidgeFit {
+  const groups = [...new Set(peers.map(({ p }) => groupOf(p)))].sort();
+  const gidx = new Map(groups.map((g, i) => [g, i]));
+  const baseCount = baseFeat(peers[0]!.p).length;
+  const k = 1 + baseCount + groups.length;
+  const X = peers.map(({ p }) => {
+    const x = new Array<number>(k).fill(0);
+    x[0] = 1;
+    for (let j = 0; j < baseCount; j++) x[1 + j] = baseFeat(p)[j]!;
+    x[1 + baseCount + gidx.get(groupOf(p))!] = 1;
+    return x;
+  });
+  const y = peers.map(({ y: yy }) => yy);
+  const beta = startBeta !== undefined && startBeta.length === k ? [...startBeta] : new Array<number>(k).fill(0);
+  // Each row has only baseCount + 2 nonzero entries (the intercept, the base
+  // features and its one group dummy), so the Hessian and gradient are built
+  // over those columns only. Skipping the zeros is exact: a zero term adds
+  // nothing to any sum, so the fit is bit-identical to the dense build and the
+  // Hessian build drops from O(n·k²) to O(n·(baseCount + 2)²).
+  const nzList = X.map((_, i) => {
+    const nz = [0];
+    for (let j = 0; j < baseCount; j++) nz.push(1 + j);
+    nz.push(1 + baseCount + gidx.get(groupOf(peers[i]!.p))!);
+    return nz;
+  });
+  for (let it = 0; it < maxIt; it++) {
+    const g = new Array<number>(k).fill(0);
+    const H: number[][] = Array.from({ length: k }, () => new Array<number>(k).fill(0));
+    for (let i = 0; i < peers.length; i++) {
+      const xi = X[i]!;
+      const nz = nzList[i]!;
+      let z = 0;
+      for (const j of nz) z += xi[j]! * beta[j]!;
+      const pr = 1 / (1 + Math.exp(-Math.max(-30, Math.min(30, z))));
+      const w = Math.max(pr * (1 - pr), 1e-6);
+      const r = y[i]! - pr;
+      for (const a of nz) {
+        g[a]! += xi[a]! * r;
+        for (const b of nz) H[a]![b]! += xi[a]! * xi[b]! * w;
+      }
+    }
+    for (let j = 1 + baseCount; j < k; j++) {
+      g[j]! -= lambda * beta[j]!;
+      H[j]![j]! += lambda;
+    }
+    for (let a = 1; a < k; a++) H[a]![a]! += 1e-6;
+    const step = solveLinear(H, g);
+    let maxStep = 0;
+    for (let j = 0; j < k; j++) {
+      beta[j]! += step[j]!;
+      maxStep = Math.max(maxStep, Math.abs(step[j]!));
+    }
+    if (maxStep < 1e-8) break;
+  }
+  const logitAt = (p: SnapshotProtocol, t: number): number => {
+    const feat = baseFeat(p);
+    let z = beta[0]!;
+    z += beta[1]! * t;
+    for (let j = 1; j < baseCount; j++) z += beta[1 + j]! * feat[j]!;
+    const gi = gidx.get(groupOf(p));
+    if (gi !== undefined) z += beta[1 + baseCount + gi]!;
+    return z;
+  };
+  const fAt = (p: SnapshotProtocol, t: number): number => {
+    const z = logitAt(p, t);
+    return 1 / (1 + Math.exp(-Math.max(-30, Math.min(30, z))));
+  };
+  const pred = (p: SnapshotProtocol): number => fAt(p, baseFeat(p)[0]!);
+  return { beta, baseCount, groups, gidx, logitAt, fAt, pred };
+}
+
+/** The survival-conditional odds fit (radar-4): the O2a category-ridge-16
+ * logistic as the recording curve F(t), and the horizon t_max, the oldest
+ * peer's age in the snapshot. A protocol's token odds are
+ * P(eventually records a token | has not recorded by its current age)
+ * = (F(t_max) − F(age)) / (1 − F(age)). */
+export interface SurvivalOddsFit {
+  fit: OddsRidgeFit;
+  tMax: number;
+  medianAge: number;
+  fAt: (p: SnapshotProtocol, t: number) => number;
+  oddsOf: (p: SnapshotProtocol) => number;
+}
+
+export function fitSurvivalOdds(
+  peers: { p: SnapshotProtocol; y: number }[],
+  features: OddsFeatures,
+  asOf: string,
+): SurvivalOddsFit {
+  const ageOf = (p: SnapshotProtocol): number => {
+    const a = ageYears(asOf, p.listed_at);
+    return a === null ? features.medianAge : a;
+  };
+  const baseFeat = (p: SnapshotProtocol): number[] => [
+    ageOf(p),
+    Math.log(p.tvl_usd),
+    finite(p.change_7d, 0) / 100,
+  ];
+  const groupOf = (p: SnapshotProtocol): string => p.category ?? 'Other';
+  const fit = fitOddsRidge(peers, baseFeat, groupOf, 16);
+  const dated = peers.map(({ p }) => ageYears(asOf, p.listed_at)).filter((a): a is number => a !== null);
+  const tMax = dated.length > 0 ? Math.max(...dated) : features.medianAge;
+  const fAt = (p: SnapshotProtocol, t: number): number => fit.fAt(p, t);
+  const oddsOf = (p: SnapshotProtocol): number => {
+    const a = ageOf(p);
+    const fAge = fAt(p, a);
+    const fMax = fAt(p, tMax);
+    if (1 - fAge <= 1e-9) return 1;
+    return Math.min(1, Math.max(0, (fMax - fAge) / (1 - fAge)));
+  };
+  return { fit, tMax, medianAge: features.medianAge, fAt, oddsOf };
 }
 
 // ---------------------------------------------------------------- evidence
@@ -723,13 +873,51 @@ function wfOdds(peers: { p: SnapshotProtocol; y: number }[], feat: (p: SnapshotP
   return { brier: meanOf(bs), acc: meanOf(acc) };
 }
 
+/** Leave-one-out Brier and accuracy for a ridge stage, warm-started from the full fit. */
+function looOddsRidge(
+  peers: { p: SnapshotProtocol; y: number }[],
+  baseFeat: (p: SnapshotProtocol) => number[],
+  groupOf: (p: SnapshotProtocol) => string,
+  lambda: number,
+  warm: number[],
+): { brier: number; acc: number } {
+  const bs: number[] = [];
+  const acc: number[] = [];
+  for (let i = 0; i < peers.length; i++) {
+    const fit = fitOddsRidge(peers.filter((_, j) => j !== i), baseFeat, groupOf, lambda, warm, 12);
+    const pr = fit.pred(peers[i]!.p);
+    bs.push((pr - peers[i]!.y) ** 2);
+    acc.push((pr > 0.5 ? 1 : 0) === peers[i]!.y ? 1 : 0);
+  }
+  return { brier: meanOf(bs), acc: meanOf(acc) };
+}
+
+/** Walk-forward Brier and accuracy for a ridge stage: fit on the older half of the dated peers, test on the newer half. */
+function wfOddsRidge(
+  peers: { p: SnapshotProtocol; y: number }[],
+  baseFeat: (p: SnapshotProtocol) => number[],
+  groupOf: (p: SnapshotProtocol) => string,
+  lambda: number,
+  warm: number[],
+): { brier: number; acc: number } {
+  const dated = peers.filter(({ p }) => p.listed_at !== null).sort((a, b) => (a.p.listed_at! < b.p.listed_at! ? -1 : 1));
+  const half = Math.floor(dated.length / 2);
+  const fit = fitOddsRidge(dated.slice(0, half), baseFeat, groupOf, lambda, warm, 12);
+  const test = dated.slice(half);
+  const bs = test.map(({ p, y }) => {
+    const pr = fit.pred(p);
+    return (pr - y) ** 2;
+  });
+  const acc = test.map(({ p, y }) => ((fit.pred(p) > 0.5 ? 1 : 0) === y ? 1 : 0));
+  return { brier: meanOf(bs), acc: meanOf(acc) };
+}
+
 /** The odds evidence table: each term added to the base rate, and what it did out of sample. */
 function oddsEvidence(peers: { p: SnapshotProtocol; y: number }[], f: OddsFeatures, asOf: string): EvidenceRow[] {
   const ageF = (p: SnapshotProtocol) => {
     const a = ageYears(asOf, p.listed_at);
     return a === null ? f.medianAge : a;
   };
-  const famF = (p: SnapshotProtocol) => f.familySize.get(p.category ?? 'Other') ?? 1;
   const sizeF = (p: SnapshotProtocol) => Math.log(p.tvl_usd);
   const growthF = (p: SnapshotProtocol) => finite(p.change_7d, 0) / 100;
   const chainF = (p: SnapshotProtocol) => Math.log(Math.max(1, p.chains.length));
@@ -738,37 +926,61 @@ function oddsEvidence(peers: { p: SnapshotProtocol; y: number }[], f: OddsFeatur
     const i = sorted.findIndex((q) => q.p.slug === p.slug);
     return growthF(sorted[(i + 1) % sorted.length]!.p);
   };
+  const groupOf = (p: SnapshotProtocol): string => p.category ?? 'Other';
   const baseRate = meanOf(peers.map(({ y }) => y));
   const baseBrier = meanOf(peers.map(({ y }) => (baseRate - y) ** 2));
-  const stages: { term: string; kept: boolean; feat: (p: SnapshotProtocol) => number[] }[] = [
-    { term: 'base rate', kept: false, feat: () => [] },
-    { term: '+ age years listed', kept: true, feat: (p) => [ageF(p)] },
-    { term: '+ family effect · ridge 16', kept: true, feat: (p) => [ageF(p), famF(p)] },
-    { term: '+ size curve · ln TVL', kept: true, feat: (p) => [ageF(p), famF(p), sizeF(p)] },
-    { term: '+ 7-day TVL growth', kept: true, feat: (p) => [ageF(p), famF(p), sizeF(p), growthF(p)] },
-    { term: '+ chain count · ln', kept: false, feat: (p) => [ageF(p), famF(p), sizeF(p), growthF(p), chainF(p)] },
-    { term: '+ control · growth of another row', kept: false, feat: (p) => [ageF(p), famF(p), sizeF(p), growthF(p), controlF(p)] },
-  ];
-  const out: EvidenceRow[] = [];
-  for (let si = 0; si < stages.length; si++) {
-    const s = stages[si]!;
-    if (si === 0) {
-      const baseAcc = Math.max(baseRate, 1 - baseRate);
-      out.push({ term: s.term, kept: s.kept, loo: baseBrier, walk_forward: baseBrier, loo_acc: baseAcc, wf_acc: baseAcc });
-      continue;
-    }
-    // Fit the stage once, then warm-start its leave-one-out refits from that fit.
-    const stageFit = fitOdds(peers, s.feat);
-    const loo = looOdds(peers, s.feat, stageFit.beta);
-    const wf = wfOdds(peers, s.feat, stageFit.beta);
-    out.push({ term: s.term, kept: s.kept, loo: loo.brier, walk_forward: wf.brier, loo_acc: loo.acc, wf_acc: wf.acc });
-  }
   // The base row's walk-forward figure is the training rate's Brier on the later half.
   const dated = peers.filter(({ p }) => p.listed_at !== null).sort((a, b) => (a.p.listed_at! < b.p.listed_at! ? -1 : 1));
   const half = Math.floor(dated.length / 2);
   const trainRate = meanOf(dated.slice(0, half).map(({ y }) => y));
-  out[0]!.walk_forward = meanOf(dated.slice(half).map(({ y }) => (trainRate - y) ** 2));
-  out[0]!.wf_acc = Math.max(trainRate, 1 - trainRate);
+  const baseWf = meanOf(dated.slice(half).map(({ y }) => (trainRate - y) ** 2));
+  const baseWfAcc = Math.max(trainRate, 1 - trainRate);
+  // Each stage adds one term to the recording curve. The family, size, growth,
+  // chain and control stages are ridge fits — [age, ...] plus a per-category
+  // ridge-16 random effect, the same fit the board's survival odds use. A term
+  // is kept only when it helps BOTH leave-one-out and walk-forward over the
+  // stage before it; the base rate and the control are never kept.
+  const stages: {
+    term: string;
+    ridge: boolean;
+    feat?: (p: SnapshotProtocol) => number[];
+    baseFeat?: (p: SnapshotProtocol) => number[];
+  }[] = [
+    { term: 'base rate', ridge: false },
+    { term: '+ age years listed', ridge: false, feat: (p) => [ageF(p)] },
+    { term: '+ family effect · ridge 16', ridge: true, baseFeat: (p) => [ageF(p)] },
+    { term: '+ size curve · ln TVL', ridge: true, baseFeat: (p) => [ageF(p), sizeF(p)] },
+    { term: '+ 7-day TVL growth', ridge: true, baseFeat: (p) => [ageF(p), sizeF(p), growthF(p)] },
+    { term: '+ chain count · ln', ridge: true, baseFeat: (p) => [ageF(p), sizeF(p), growthF(p), chainF(p)] },
+    { term: '+ control · growth of another row', ridge: true, baseFeat: (p) => [ageF(p), sizeF(p), growthF(p), controlF(p)] },
+  ];
+  const out: EvidenceRow[] = [];
+  let prevLoo = baseBrier;
+  let prevWf = baseWf;
+  for (let si = 0; si < stages.length; si++) {
+    const s = stages[si]!;
+    if (si === 0) {
+      const baseAcc = Math.max(baseRate, 1 - baseRate);
+      out.push({ term: s.term, kept: false, loo: baseBrier, walk_forward: baseWf, loo_acc: baseAcc, wf_acc: baseWfAcc });
+      continue;
+    }
+    // Fit the stage once, then warm-start its leave-one-out refits from that fit.
+    let loo: { brier: number; acc: number };
+    let wf: { brier: number; acc: number };
+    if (s.ridge) {
+      const stageFit = fitOddsRidge(peers, s.baseFeat!, groupOf, 16);
+      loo = looOddsRidge(peers, s.baseFeat!, groupOf, 16, stageFit.beta);
+      wf = wfOddsRidge(peers, s.baseFeat!, groupOf, 16, stageFit.beta);
+    } else {
+      const stageFit = fitOdds(peers, s.feat!);
+      loo = looOdds(peers, s.feat!, stageFit.beta);
+      wf = wfOdds(peers, s.feat!, stageFit.beta);
+    }
+    const kept = !s.term.includes('control') && loo.brier < prevLoo && wf.brier < prevWf;
+    out.push({ term: s.term, kept, loo: loo.brier, walk_forward: wf.brier, loo_acc: loo.acc, wf_acc: wf.acc });
+    prevLoo = loo.brier;
+    prevWf = wf.brier;
+  }
   return out;
 }
 
@@ -781,7 +993,7 @@ function bootstrapRanges(
   f: OddsFeatures,
   asOf: string,
   valueFit: ValueFit,
-  oddsFit: OddsFit,
+  oddsRidge: OddsRidgeFit,
 ): { se: Evidence['bootstrap'] } {
   const rng = mulberry32(MODEL.bootstrap_seed);
   const refits = MODEL.bootstrap_refits;
@@ -791,19 +1003,34 @@ function bootstrapRanges(
   const oAge: number[] = [];
   const oTvl: number[] = [];
   const oGrowth: number[] = [];
-  const oFam: number[] = [];
+  const oFamSpread: number[] = [];
+  // The odds refit is the same ridge fit the board uses, warm-started and capped
+  // at 12 iterations: a cold refit of 51 coefficients 200 times would dominate
+  // the run, and the warm start converges in a handful of steps.
+  const ageOf = (p: SnapshotProtocol): number => {
+    const a = ageYears(asOf, p.listed_at);
+    return a === null ? f.medianAge : a;
+  };
   for (let r = 0; r < refits; r++) {
     const tradedResample = Array.from({ length: traded.length }, () => traded[Math.floor(rng() * traded.length)]!);
     const peersResample = Array.from({ length: peers.length }, () => peers[Math.floor(rng() * peers.length)]!);
     const vf = fitValue(tradedResample, MODEL.value_ridge_lambda);
-    const of = fitOdds(peersResample, oddsFeaturesFor(f, asOf), oddsFit.beta);
+    const of = fitOddsRidge(
+      peersResample,
+      (p) => [ageOf(p), Math.log(p.tvl_usd), finite(p.change_7d, 0) / 100],
+      (p) => p.category ?? 'Other',
+      16,
+      oddsRidge.beta,
+      12,
+    );
     slopes.push(vf.slope - 1);
     mults.push(vf.multAt100m);
     for (const c of Object.keys(vf.effects)) catEffs.push(vf.effects[c]!);
     oAge.push(of.beta[1]!);
-    oFam.push(of.beta[2]!);
-    oTvl.push(of.beta[3]!);
-    oGrowth.push(of.beta[4]!);
+    oTvl.push(of.beta[2]!);
+    oGrowth.push(of.beta[3]!);
+    const groupFx = of.beta.slice(4);
+    oFamSpread.push(Math.max(...groupFx) - Math.min(...groupFx));
   }
   // A robust spread: the interquartile range over 1.349. A few resamples separate
   // (a feature that perfectly splits the resampled peers) and their coefficients
@@ -820,14 +1047,15 @@ function bootstrapRanges(
     mult_at_100m: valueFit.multAt100m,
     category_effect_lo: Math.min(...Object.values(valueFit.effects)),
     category_effect_hi: Math.max(...Object.values(valueFit.effects)),
-    odds_age: oddsFit.beta[1]!,
+    odds_age: oddsRidge.beta[1]!,
     odds_age_se: robustSd(oAge),
-    odds_tvl: oddsFit.beta[3]!,
+    odds_tvl: oddsRidge.beta[2]!,
     odds_tvl_se: robustSd(oTvl),
-    odds_growth: oddsFit.beta[4]!,
+    odds_growth: oddsRidge.beta[3]!,
     odds_growth_se: robustSd(oGrowth),
-    odds_family: oddsFit.beta[2]!,
-    odds_family_se: robustSd(oFam),
+    odds_family_lo: Math.min(...oddsRidge.beta.slice(4)),
+    odds_family_hi: Math.max(...oddsRidge.beta.slice(4)),
+    odds_family_spread_se: sd(oFamSpread),
   };
   return { se };
 }
@@ -1005,7 +1233,7 @@ export function buildBoard(snapshot: Snapshot, model: ModelConstants = MODEL): B
   const valueFit = fitValue(traded, model.value_ridge_lambda);
   const peers = oddsPeers(snapshot);
   const features = oddsFeatures(snapshot, peers);
-  const oddsFit = fitOdds(peers, oddsFeaturesFor(features, snapshot.as_of));
+  const survival = fitSurvivalOdds(peers, features, snapshot.as_of);
   const index = bySlug(snapshot.protocols);
   const watchSet = new Set(snapshot.watchlist);
   const ranked = snapshot.protocols.filter(isRankable);
@@ -1022,14 +1250,23 @@ export function buildBoard(snapshot: Snapshot, model: ModelConstants = MODEL): B
     const catEffect = valueFit.effects[p.category ?? 'Other'] ?? 1;
     const catRounded = Math.round(catEffect * 1e6) / 1e6;
     const ifl = Math.max(1, Math.round(p.tvl_usd * sizeOnly * catRounded));
-    const odds = Math.max(0.000001, Math.round(oddsFit.pred(p) * 1e6) / 1e6);
+    const age = ageDays(snapshot.as_of, p.listed_at);
+    const a = ageYears(snapshot.as_of, p.listed_at);
+    const ageY = a === null ? features.medianAge : a;
+    const oddsRaw = survival.oddsOf(p);
+    const odds = Math.max(0.000001, Math.round(oddsRaw * 1e6) / 1e6);
+    const oc = Math.min(1 - 1e-6, Math.max(1e-6, odds));
+    const oddsLogit = Math.round(Math.log(oc / (1 - oc)) * 10000) / 10000;
+    const fAge = survival.fAt(p, ageY);
+    const fMax = survival.fAt(p, survival.tMax);
+    const famEffect = survival.fit.gidx.get(p.category ?? 'Other') !== undefined
+      ? survival.fit.beta[1 + survival.fit.baseCount + survival.fit.gidx.get(p.category ?? 'Other')!]!
+      : 0;
     const parentFactor = offSet.has(p.slug) ? model.parent_factor : 1;
     const implied = Math.max(1, Math.round(ifl * odds * parentFactor));
     const farm = farmPlan(p, implied, model);
-    const age = ageDays(snapshot.as_of, p.listed_at);
-    const a = ageYears(snapshot.as_of, p.listed_at);
     const scope: BoardRow['scope'] = watchSet.has(p.slug) ? 'watchlist' : offSet.has(p.slug) ? 'off-list' : 'early';
-    return { p, ifl, odds, parentFactor, implied, farm, age, scope, a, sizeOnly, catRounded };
+    return { p, ifl, odds, oddsLogit, fAge, fMax, famEffect, parentFactor, implied, farm, age, scope, a, sizeOnly, catRounded };
   });
   scored.sort((a, b) => b.implied - a.implied || (a.p.slug < b.p.slug ? -1 : a.p.slug > b.p.slug ? 1 : 0));
   return scored.map((s, i) => {
@@ -1067,7 +1304,10 @@ export function buildBoard(snapshot: Snapshot, model: ModelConstants = MODEL): B
       model: {
         size_multiple: s.sizeOnly,
         category_effect: s.catRounded,
-        odds_logit: Math.round(oddsFit.logit(s.p) * 10000) / 10000,
+        odds_logit: s.oddsLogit,
+        odds_f_age: Math.round(s.fAge * 10000) / 10000,
+        odds_f_max: Math.round(s.fMax * 10000) / 10000,
+        family_effect: Math.round(s.famEffect * 10000) / 10000,
         age_years: s.a === null ? Math.round(features.medianAge * 100) / 100 : Math.round(s.a * 100) / 100,
         family_size: features.familySize.get(s.p.category ?? 'Other') ?? 1,
         growth_frac: Math.round(finite(s.p.change_7d, 0) / 100 * 10000) / 10000,
@@ -1126,6 +1366,9 @@ export function radarRow(row: BoardRow, onWatchlist: boolean): RadarRow {
     category_effect: row.model.category_effect,
     age_years: row.model.age_years,
     family_size: row.model.family_size,
+    odds_f_age: row.model.odds_f_age,
+    odds_f_max: row.model.odds_f_max,
+    family_effect: row.model.family_effect,
     growth_frac: row.model.growth_frac,
     watchlist: onWatchlist,
   };
@@ -1185,7 +1428,7 @@ export function buildRadar(snapshot: Snapshot, model: ModelConstants = MODEL): {
   const valueFit = fitValue(traded, model.value_ridge_lambda);
   const peers = oddsPeers(snapshot);
   const features = oddsFeatures(snapshot, peers);
-  const oddsFit = fitOdds(peers, oddsFeaturesFor(features, snapshot.as_of));
+  const survival = fitSurvivalOdds(peers, features, snapshot.as_of);
   const board = buildBoard(snapshot, model);
   const live = liveRows(snapshot);
   const watchSet = new Set(snapshot.watchlist);
@@ -1212,7 +1455,7 @@ export function buildRadar(snapshot: Snapshot, model: ModelConstants = MODEL): {
   };
   const checksumSource = board.map((r) => `${r.rank}:${r.slug}:${r.implied_value_usd}`).join('|');
   const honesty = rangeHonesty(traded, valueFit);
-  const ranges = bootstrapRanges(traded, peers, features, snapshot.as_of, valueFit, oddsFit);
+  const ranges = bootstrapRanges(traded, peers, features, snapshot.as_of, valueFit, survival.fit);
   const radar: RadarData = {
     as_of: snapshot.as_of,
     source: snapshot.source,
@@ -1227,7 +1470,12 @@ export function buildRadar(snapshot: Snapshot, model: ModelConstants = MODEL): {
       category_effects: Object.fromEntries(Object.entries(valueFit.effects).map(([c, e]) => [c, Math.round(e * 10000) / 10000])),
     },
     odds: {
-      beta: oddsFit.beta.map((b) => Math.round(b * 10000) / 10000),
+      beta: survival.fit.beta.slice(0, 4).map((b) => Math.round(b * 10000) / 10000),
+      group_effects: Object.fromEntries(
+        survival.fit.groups.map((g) => [g, Math.round(survival.fit.beta[1 + survival.fit.baseCount + survival.fit.gidx.get(g)!]! * 10000) / 10000]),
+      ),
+      t_max_years: Math.round(survival.tMax * 100) / 100,
+      kind: 'survival-conditional',
       peers_n: peers.length,
       base_rate: Math.round(meanOf(peers.map(({ y }) => y)) * 10000) / 10000,
       median_age_years: Math.round(features.medianAge * 100) / 100,
