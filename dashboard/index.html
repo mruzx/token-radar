@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Token Radar: pre-token protocols ranked by implied value</title>
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+<a class="skip" href="#board">Skip to the board</a>
+<main id="board" tabindex="-1" aria-busy="true">
+  <div class="shell">
+    <header class="top">
+      <div class="brand"><span class="mark" aria-hidden="true"></span><span class="brand-name">Token Radar</span></div>
+      <div class="top-meta"><span id="meta-snapshot">Snapshot 2026-11-14</span><span>DefiLlama protocol index</span><span id="meta-model">radar-2 model</span></div>
+    </header>
+    <section class="lede">
+      <div>
+        <h1>Which pre-token protocol would be worth the most if it launched one?</h1>
+        <p>Every protocol below records no token yet. The board prices each one off what the market already pays for tokens that trade in its own category, then adjusts for seven-day growth and for how long it has run with no token. The watchlist is the floor: every protocol with at least $50M of TVL and no token on record. The early radar adds 160 pre-token protocols below that floor. Implied value is a model, not a promise, and never a prediction that a token is issued.</p>
+      </div>
+      <div class="facts">
+        <div class="fact"><span>Watchlist covered</span><b id="fact-watchlist">40 / 40</b></div>
+        <div class="fact"><span>Pre-token rows scored</span><b id="fact-board">200</b></div>
+        <div class="fact"><span>Total implied value</span><b id="fact-total">—</b></div>
+        <div class="fact"><span>Live-token protocols set aside</span><b id="fact-live">24</b></div>
+      </div>
+    </section>
+    <section class="panel spotlight" aria-labelledby="spotlight-title">
+      <h2 id="spotlight-title">Top of the board</h2>
+      <p class="sub">The five strongest implied values. Select any card for its model and farm plan.</p>
+      <div class="cards" id="spotlight"></div>
+    </section>
+    <div class="controls">
+      <div class="field"><label for="q">Search</label><input type="search" id="q" placeholder="Search name, category or chain" aria-label="Search the board"></div>
+      <div class="field"><label for="category">Category</label><select id="category" aria-label="Filter by category"></select></div>
+      <div class="field"><label for="chain">Chain</label><select id="chain" aria-label="Filter by chain"></select></div>
+      <div class="field"><label for="scope">Scope</label><select id="scope" aria-label="Filter by scope"><option value="all">All 200 rows</option><option value="watchlist">Watchlist only</option><option value="early">Early radar only</option></select></div>
+      <div class="field"><label for="sort">Sort by</label><select id="sort" aria-label="Sort the board"><option value="implied">Implied value</option><option value="tvl">TVL</option><option value="growth">7-day growth</option><option value="age">Age</option><option value="name">Name</option></select></div>
+      <div class="field"><span class="sub">Token status</span><div class="tabs" role="tablist"><button type="button" id="tab-pre" role="tab" aria-selected="true">Pre-token</button><button type="button" id="tab-live" role="tab" aria-selected="false">Live token</button><button type="button" id="tab-model" role="tab" aria-selected="false">How the model works</button></div></div>
+      <span class="count" id="count"></span>
+    </div>
+    <div id="view"></div>
+    <section class="panel model" id="model-panel" aria-labelledby="model-title">
+      <h2 id="model-title">How implied value is computed</h2>
+      <p class="sub">One function scores every protocol. No name is special-cased, and no row is hand-picked.</p>
+      <p class="formula" id="formula">implied = round( tvl_usd × peer multiple × (1 + clamp(change_7d, −60, 120) / 100 × 0.5) × (0.6 + min(age_days, 1095) / 1095 × 0.4) )</p>
+      <p>The peer multiple is what the market pays per dollar of TVL for tokens that already trade in the protocol&rsquo;s category: the median market-cap-per-TVL of the snapshot&rsquo;s live-token protocols in that category, shrunk toward the whole market&rsquo;s median with a prior weight of 8, and clamped to 0.05&ndash;1.00. A category with few live tokens barely moves its multiple; a category with none falls back to the market median. TVL and seven-day growth come from the snapshot. Age is the time since the protocol was first listed, the best record of how long it has run with no token; an unlisted age uses 365 days.</p>
+      <h3>Peer multiples by category</h3>
+      <p class="sub">Live-token protocols only, from this snapshot. n is how many live tokens set the median.</p>
+      <div class="table-wrap"><table id="peers">
+        <caption class="sub">Each category&rsquo;s median market-cap-per-TVL, the shrunk multiple the model uses, and the live-token count behind it.</caption>
+        <thead><tr><th scope="col">Category</th><th scope="col" class="num">Live tokens</th><th scope="col" class="num">Peer median</th><th scope="col" class="num">Multiple used</th></tr></thead>
+        <tbody></tbody>
+      </table></div>
+      <p class="sub">A protocol records no token when its DefiLlama record carries no market cap, no CoinGecko id and no symbol. That is a statement about the record, never a guarantee the protocol has no token. Wrapped, staked and bridged products of tokens that already trade are off the board by the same rule.</p>
+    </section>
+    <footer class="foot">
+      <p>Source: DefiLlama protocol index, fetched 2026-11-14. Board built from the sealed snapshot alone; the page renders with no network. Farm plans are generic guidance: use a fresh wallet, never pay to claim, and check the protocol&rsquo;s own page before you act.</p>
+    </footer>
+  </div>
+  <dialog class="detail" id="detail" aria-labelledby="detail-title"></dialog>
+</main>
+<script src="../data.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
