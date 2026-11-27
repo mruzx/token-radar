@@ -1,4 +1,4 @@
-// Token Radar dashboard, model radar-4. Renders the board from window.RADAR. No network.
+// Token Radar dashboard, model radar-4.
 (function () {
   'use strict';
 
@@ -34,9 +34,6 @@
   function fmtMult(n) { return 'x' + n.toFixed(2); }
   function fmtOdds(n) { return Math.round(n * 100) + '%'; }
 
-  // The page recomputes each row from the snapshot figures and checks the number
-  // board.json carries: if-launches = TVL x size multiple x category effect,
-  // implied = if-launches x token odds x parent factor.
   function iflOf(row) {
     return Math.max(1, Math.round(row.tvl_usd * row.size_multiple * row.category_effect));
   }
@@ -44,7 +41,6 @@
     return Math.max(1, Math.round(iflOf(row) * row.token_odds * row.parent_factor));
   }
 
-  // The farm plan mirrors board.json: 0.02% of TVL (cap $10,000), a 7.0% drop, fees and hours by primary chain, a verdict vs a T-bill and $25/hour. The sliders reprice it live.
   function farmFor(row) {
     var m = DATA.model;
     var chain = row.chains && row.chains.length > 0 ? row.chains[0] : null;
@@ -59,8 +55,8 @@
     return { position: position, drop: drop, fees: fees, hours: hours, net: net, netPerHour: netPerHour, tbill: tbill, verdict: verdict };
   }
   function verdictCounts(list) {
-    var c = { FARM: 0, MARGINAL: 0, SKIP: 0, farm: [] };
-    list.forEach(function (r) { var f = farmFor(r); c[f.verdict]++; if (f.verdict === 'FARM') c.farm.push([r.name, f.netPerHour]); });
+    var c = { FARM: 0, MARGINAL: 0, SKIP: 0, farm: [], nt: null, nh: null };
+    list.forEach(function (r) { var f = farmFor(r); c[f.verdict]++; if (f.verdict === 'FARM') c.farm.push([r.name, f.netPerHour]); else { var a = f.tbill - f.net, b = DATA.model.farm_hourly_usd - f.netPerHour; if (a > 0 && (!c.nt || a < c.nt[1])) c.nt = [r.name, a]; if (b > 0 && (!c.nh || b < c.nh[1])) c.nh = [r.name, b]; } });
     c.farm.sort(function (a, b) { return b[1] - a[1]; });
     return c;
   }
@@ -86,7 +82,6 @@
     return node;
   }
 
-  // Farm steps are generic guidance from category, chains, TVL and age. No name is special-cased.
   function chainOf(p) { return p.chains && p.chains.length > 0 ? p.chains[0] : 'its main chain'; }
   function capitalFor(p) {
     if (p.tvl_usd >= 5e9) return 250;
@@ -131,12 +126,12 @@
     var capital = capitalFor(p);
     var hold = holdDaysFor(p.age_days);
     return [
-      { text: 'Use a fresh wallet that holds only the funds you plan to farm, and keep its seed phrase offline.', cost: 'under $3 of gas for the first transaction', time: '5 minutes' },
+      { text: 'Use a fresh wallet holding only the funds you plan to farm; keep its seed phrase offline.', cost: 'under $3 of gas for the first transaction', time: '5 minutes' },
       { text: actionFor(p, capital, chain), cost: '$' + capital + ' of capital and about $' + (capital >= 150 ? 8 : 4) + ' of gas', time: '15 minutes to set up' },
-      { text: 'Make one qualifying action each week, such as a deposit, a borrow, a swap or a vote.', cost: 'about $2 of gas a week', time: '10 minutes a week' },
-      { text: 'Hold the position for at least ' + hold + ' days so the activity is counted in more than one snapshot.', cost: 'the $' + capital + ' stays in the position', time: hold + ' days' },
-      { text: "Before you withdraw, open the protocol's own points or rewards page and claim only from the link it publishes.", cost: 'no fee to check, and never pay to claim', time: '10 minutes' },
-      { text: 'Write the wallet, the dates and every transaction in a farm log.', cost: 'nothing but the log', time: '5 minutes' }
+      { text: 'Make one qualifying action a week, such as a deposit, borrow, swap or vote.', cost: 'about $2 of gas a week', time: '10 minutes a week' },
+      { text: 'Hold the position at least ' + hold + ' days so the activity is counted in more than one snapshot.', cost: 'the $' + capital + ' stays in the position', time: hold + ' days' },
+      { text: "Before withdrawing, open the protocol's own points or rewards page and claim only from its published link.", cost: 'no fee to check, and never pay to claim', time: '10 minutes' },
+      { text: 'Log the wallet, the dates and every transaction.', cost: 'nothing but the log', time: '5 minutes' }
     ].map(stepText);
   }
 
@@ -201,7 +196,6 @@
   }
 
   function keptOf(list) {
-    // Kept terms among the tested ones; the baseline and the placebo control do not count.
     var tested = list.filter(function (e) { return e.term.indexOf('control') < 0 && e.term !== 'flat median multiple' && e.term !== 'base rate'; });
     var kept = tested.filter(function (e) { return e.kept; }).length;
     return kept + ' of ' + tested.length;
@@ -263,7 +257,7 @@
       vc.FARM + ' <small>of ' + DATA.board_size + '</small>',
       vc.MARGINAL + ' marginal, ' + vc.SKIP + ' skip. Farm needs the net to beat a T-bill at ' + (DATA.model.tbill_annual * 100).toFixed(2) +
       '% over ' + state.plan.horizon + ' weeks <i>and</i> $' + DATA.model.farm_hourly_usd + '/hour. ' +
-      (vc.farm.length ? vc.farm.length + ' clear both bars, best first: ' + vc.farm.map(function (f) { return f[0] + ' ' + fmtMoney(f[1]) + '/hr'; }).join(', ') + '.' : 'No row clears both bars at the current plan.')));
+      (vc.farm.length ? vc.farm.length + ' clear both bars, best first: ' + vc.farm.map(function (f) { return f[0] + ' ' + fmtMoney(f[1]) + '/hr'; }).join(', ') + '.' : 'No row clears both bars at the current plan.') + (vc.nt || vc.nh ? ' Closest: ' + (vc.nt ? vc.nt[0] + ' ' + fmtMoney(vc.nt[1]) + ' short of the T-bill' : '') + (vc.nt && vc.nh ? '; ' : '') + (vc.nh ? vc.nh[0] + ' ' + fmtMoney(vc.nh[1]) + '/hr short of $' + DATA.model.farm_hourly_usd + '/hr' : '') + '.' : '')));
     host.appendChild(statCard('Watchlist ranked',
       DATA.accounting.watchlist + ' / ' + DATA.watchlist_size,
       'Plus ' + (DATA.accounting.off_list + DATA.accounting.early) + ' pre-token (' + DATA.accounting.off_list + ' off-list, ' + DATA.accounting.early + ' early).'));
@@ -299,7 +293,6 @@
     });
   }
 
-  // The top-pick spotlight: the rank-1 row, rendered from the same data as the board.
   function fillTopPick() {
     var host = document.getElementById('top-pick-body');
     if (!host) return;
